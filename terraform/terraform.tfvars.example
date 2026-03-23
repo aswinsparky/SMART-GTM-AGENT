@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and adjust
+aws_region   = "us-east-1"
+project_name = "smart-gtm-agent"
+environment  = "dev"
+
+# Backend compute: "ecs" (Fargate) or "ec2" (EC2 behind ALB)
+# backend_type = "ecs"
+# backend_type = "ec2"
+
+# When backend_type = "ec2"
+# ec2_instance_type = "t3.micro"
+# ec2_min_size      = 1
+# ec2_max_size      = 2
+
+# Optional (ECS)
+# db_instance_class = "db.t3.micro"
+# ecs_cpu             = 256
+# ecs_memory_mb       = 512
+# ecs_desired_count   = 1
+# backend_mock_mode   = true   # use mock GTM plans (no OpenAI) when quota exceeded or for testing
+# backend_llm_provider = "bedrock"   # use AWS Bedrock (Claude) instead of OpenAI; no API key needed
+# backend_bedrock_model_id = "anthropic.claude-3-haiku-20240307-v1:0"   # Haiku is cheaper
