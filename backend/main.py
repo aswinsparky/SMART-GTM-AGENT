@@ -3,14 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import os
+import asyncio
 from dotenv import load_dotenv
-from starlette.concurrency import run_in_threadpool
 import logging
-import openai
+from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 import models, schemas, crud
 from database import SessionLocal, engine, Base
 import json
+import boto3
 
 load_dotenv()
 
@@ -31,6 +32,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def _invoke_bedrock_sync(prompt: str, model_id: str, region: str) -> str:
+    """Call Bedrock Claude with the prompt; returns assistant text. Runs in thread."""
+    client = boto3.client("bedrock-runtime", region_name=region)
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "system": "You are an expert go-to-market strategist. Keep responses concise and focused. Return only valid JSON.",
+        "messages": [{"role": "user", "content": prompt}],
+    })
+    resp = client.invoke_model(
+        modelId=model_id,
+        contentType="application/json",
+        accept="application/json",
+        body=body,
+    )
+    out = json.loads(resp["body"].read())
+    # Messages API response: content is list of blocks; text in block with type "text"
+    content = out.get("content", [])
+    for block in content:
+        if block.get("type") == "text":
+            return block.get("text", "")
+    return ""
 
 # dependency
 def get_db():
@@ -74,8 +99,7 @@ def set_api_key(payload: APIKeyIn):
                 f.write(f"OPENAI_API_KEY={api_key}\n")
                 
         os.environ['OPENAI_API_KEY'] = api_key
-        openai.api_key = api_key
-        
+
         return {"status": "success", "message": "API key updated successfully"}
         
     except Exception as e:
@@ -91,8 +115,8 @@ async def generate_plan(input_data: schemas.GTMInput, db: Session = Depends(get_
         api_key = os.getenv('OPENAI_API_KEY')
         mock_mode = str(os.getenv('MOCK_MODE', '')).lower() in ('1', 'true', 'yes')
 
-        # If no OpenAI key but mock mode enabled, return a dynamic mock strategy based on input
-        if not api_key and mock_mode:
+        # If mock mode enabled, return a dynamic mock strategy without calling OpenAI (e.g. when over quota)
+        if mock_mode:
             logger.info('MOCK_MODE enabled: returning dynamic mock strategy without calling OpenAI')
             
             # Parse competitors into a list
@@ -194,10 +218,15 @@ async def generate_plan(input_data: schemas.GTMInput, db: Session = Depends(get_
                 "mock": True
             }
 
-        if not api_key:
-            raise HTTPException(status_code=401, detail="OpenAI API key not set on server. Please set it via Settings or add to .env or enable MOCK_MODE for dev")
+        llm_provider = (os.getenv("LLM_PROVIDER") or "openai").strip().lower()
+        bedrock_model = (os.getenv("BEDROCK_MODEL_ID") or "anthropic.claude-3-haiku-20240307-v1:0").strip()
+        aws_region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1").strip()
 
-        openai.api_key = api_key
+        if llm_provider == "bedrock":
+            # Bedrock: no API key needed; ECS task role is used
+            pass
+        elif not api_key:
+            raise HTTPException(status_code=401, detail="OpenAI API key not set on server. Please set it via Settings or add to .env or enable MOCK_MODE for dev")
 
         # build a detailed prompt
         prompt = f"""Generate a detailed go-to-market strategy in JSON format for the following input:
@@ -245,66 +274,60 @@ Return a detailed JSON with the following structure:
 
 Provide comprehensive details for each section while maintaining valid JSON format."""
 
-        try:
-            # Increase timeouts to be more tolerant of slower model responses.
-            # Support both old openai package (ChatCompletion.acreate) and new OpenAI client interface.
-            if hasattr(openai, 'ChatCompletion'):
-                # old-style interface
-                resp = await openai.ChatCompletion.acreate(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are an expert go-to-market strategist. Keep responses concise and focused."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=500,
-                    timeout=60,
-                    request_timeout=60
+        if llm_provider == "bedrock":
+            try:
+                text = await asyncio.to_thread(
+                    _invoke_bedrock_sync, prompt, bedrock_model, aws_region
                 )
-            else:
-                # new-style OpenAI client
-                try:
-                    client = openai.OpenAI()
-                except Exception:
-                    # fallback import
-                    from openai import OpenAI as OpenAIClass
-                    client = OpenAIClass()
-
-                # call the blocking client in a thread to avoid blocking the event loop
-                resp = await run_in_threadpool(
-                    client.chat.completions.create,
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are an expert go-to-market strategist. Keep responses concise and focused."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=500,
-                )
-        except Exception as e:
-            # openai library versions differ; don't rely on openai.error namespace existing.
-            msg = str(e)
-            logger.exception("OpenAI request failed")
-            # treat timeouts specially
-            if 'timeout' in msg.lower() or isinstance(e, TimeoutError):
+                if not text:
+                    raise ValueError("Bedrock returned empty response")
+            except Exception as e:
+                msg = str(e)
+                logger.exception("Bedrock request failed")
+                if "throttl" in msg.lower() or "rate" in msg.lower():
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Bedrock rate limit. Try again shortly or use a different model."
+                    )
                 raise HTTPException(
-                    status_code=504,
-                    detail="Request timed out. The server is experiencing high load, please try again."
+                    status_code=500,
+                    detail=f"Bedrock failed: {msg}. Ensure the ECS task role has bedrock:InvokeModel and the model is enabled in Bedrock."
                 )
-            # httpx timeouts may surface as httpx.ReadTimeout
-            if 'readtimeout' in msg.lower() or 'read timeout' in msg.lower():
-                raise HTTPException(status_code=504, detail="Request timed out communicating with OpenAI.")
-            # fallback
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to generate plan: {msg}. Please try again."
-            )
+        else:
+            client = AsyncOpenAI(api_key=api_key)
+            try:
+                resp = await client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are an expert go-to-market strategist. Keep responses concise and focused."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=500,
+                    timeout=60.0,
+                )
+            except Exception as e:
+                msg = str(e)
+                logger.exception("OpenAI request failed")
+                if '429' in msg or 'insufficient_quota' in msg.lower():
+                    raise HTTPException(
+                        status_code=429,
+                        detail="OpenAI quota exceeded. Check your plan and billing at platform.openai.com, or add MOCK_MODE=1 to backend/.env to use mock plans without the API."
+                    )
+                if 'timeout' in msg.lower() or isinstance(e, TimeoutError):
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Request timed out. The server is experiencing high load, please try again."
+                    )
+                if 'readtimeout' in msg.lower() or 'read timeout' in msg.lower():
+                    raise HTTPException(status_code=504, detail="Request timed out communicating with OpenAI.")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate plan: {msg}. Please try again."
+                )
 
-        # Extract assistant text robustly since different openai client versions return different types
-        text = None
-        try:
-            text = resp['choices'][0]['message']['content']
-        except Exception:
+            # Extract assistant text (openai>=1.0 returns object with .choices[0].message.content)
+            text = None
             try:
                 choices = getattr(resp, 'choices', None)
                 if choices:

@@ -42,12 +42,18 @@ export default function GTMForm({ onResult }){
       );
 
       console.log('Server response:', res.data);
-      if (res.data?.success && res.data?.data?.strategy) {
-        console.log('Strategy data:', res.data.data.strategy);
-        onResult(res.data.data.strategy);
+      // Backend may return { detail: "..." } on error (e.g. 200 with error body in some cases)
+      if (res.data?.detail && typeof res.data.detail === 'string') {
+        throw new Error(res.data.detail);
+      }
+      const strategy = res.data?.data?.strategy ?? res.data?.strategy;
+      if (strategy && typeof strategy === 'object') {
+        onResult(strategy);
       } else {
         console.error('Invalid response format:', res.data);
-        throw new Error('Invalid response format from server');
+        throw new Error(
+          res.data?.detail || 'Invalid response format from server. The backend may have returned an error—check the browser console (F12) for details.'
+        );
       }
     } catch (err) {
       console.error('Generation error:', err);
@@ -59,8 +65,10 @@ export default function GTMForm({ onResult }){
       } else if (err.response?.status === 504) {
         setError('Server timeout. Please try again.');
       } else {
+        const detail = err?.response?.data?.detail;
+        const detailStr = Array.isArray(detail) ? detail.map(d => d?.msg || JSON.stringify(d)).join(', ') : detail;
         setError(
-          err?.response?.data?.detail ||
+          detailStr ||
           err?.message ||
           'Failed to generate plan. Please try again.'
         );

@@ -1,0 +1,70 @@
+# Terraform plan on PR, apply on push to main (optional: use branch protection)
+name: Terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform.yml'
+
+env:
+  TF_VERSION: '1.5.0'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+        # Use either OIDC (AWS_ROLE_ARN) or static keys (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -input=false
+
+      - name: Terraform Format
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -input=false -no-color -out=tfplan
+        env:
+          TF_VAR_environment: ${{ github.ref == 'refs/heads/main' && 'dev' || 'dev' }}
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve tfplan

@@ -41,3 +41,7 @@ Open the frontend (usually http://localhost:5173) and the backend at http://loca
 ## Notes
 - For local development we support saving API key to `.env` via `/api-key` endpoint. In production, use a secrets manager.
 - SQLite DB file will be created automatically in backend directory.
+
+## Cloud deployment
+- **Terraform + AWS + CI/CD**: See **[docs/TERRAFORM_AWS_CICD.md](docs/TERRAFORM_AWS_CICD.md)** for Terraform, AWS (ECS, RDS, S3, CloudFront), and GitHub Actions pipelines.
+- **Other clouds**: See **[docs/CLOUD_SETUP.md](docs/CLOUD_SETUP.md)** for Vercel, Railway, or Render.

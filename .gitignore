@@ -1,0 +1,36 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfplan
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
+!terraform/*.tfvars.example
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Frontend build output (CI should build)
+frontend/dist/
+
+# Local SQLite DB
+*.db
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+*.log
